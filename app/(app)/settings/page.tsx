@@ -69,7 +69,10 @@ export default function SettingsPage() {
     });
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-      await supabase.from("profiles").update({ level }).eq("id", user.id);
+      await supabase
+        .from("profiles")
+        .update({ level, display_name: name })
+        .eq("id", user.id);
     }
     setSaving(false);
   }
