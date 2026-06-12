@@ -79,12 +79,23 @@ export default function SettingsPage() {
 
   async function handleDeleteAccount() {
     const confirmed = window.confirm(
-      "Are you sure you want to delete your account? This action is permanent and cannot be undone. All your progress data will be lost."
+      "Are you sure you want to delete your account? This is permanent and cannot be undone. All your progress, attempts, and data will be erased immediately."
     );
     if (!confirmed) return;
-    // Sign out — actual deletion would require a server-side admin call
-    await supabase.auth.signOut();
-    window.location.href = "/login";
+
+    try {
+      const res = await fetch("/api/account/delete", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Could not delete account: ${data.error ?? "Unknown error"}`);
+        return;
+      }
+      // Deletion succeeded — sign out locally and redirect
+      await supabase.auth.signOut();
+      window.location.href = "/login";
+    } catch {
+      alert("Network error. Please try again.");
+    }
   }
 
   async function handleExportData() {

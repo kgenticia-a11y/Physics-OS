@@ -55,14 +55,6 @@ export function InclinedPlaneSim() {
   const netF = gravComp - frictionF;
   const accel = netF > 0 ? netF / mass : 0;
 
-  // Ramp geometry helpers
-  function rampEnd() {
-    return {
-      x: RAMP_BASE_X + RAMP_LEN * Math.cos(rad),
-      y: RAMP_BASE_Y - RAMP_LEN * Math.sin(rad),
-    };
-  }
-
   // Convert position along ramp (metres) to canvas coords
   // Block starts near top of ramp; positive pos = sliding down
   const PX_PER_M = 40;
