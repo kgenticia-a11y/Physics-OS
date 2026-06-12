@@ -8,210 +8,320 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Play, Pause, RotateCcw } from "lucide-react";
 
+const CANVAS_W = 740;
+const CANVAS_H = 300;
+const GROUND_Y = 220;
+
+function sliderVal(v: number | readonly number[]): number {
+  return typeof v === "number" ? v : v[0];
+}
+
+function getRadius(m: number) {
+  return 15 + m * 5;
+}
+
+// Clamp position so objects stay on screen
+function clampPos(p: number, r: number) {
+  return Math.max(r + 4, Math.min(CANVAS_W - r - 4, p));
+}
+
 export function CollisionSim() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>(0);
+  const animRef = useRef<number>(0);
 
+  // Params
   const [mass1, setMass1] = useState(2);
   const [mass2, setMass2] = useState(1);
-  const [v1, setV1] = useState(5);
-  const [v2, setV2] = useState(-3);
+  const [v1Init, setV1Init] = useState(5);
+  const [v2Init, setV2Init] = useState(-3);
   const [elastic, setElastic] = useState(true);
+  const [speed, setSpeed] = useState(1);
   const [running, setRunning] = useState(false);
   const [collided, setCollided] = useState(false);
+  const [done, setDone] = useState(false);
 
-  const [pos1, setPos1] = useState(150);
-  const [pos2, setPos2] = useState(550);
-  const [vel1, setVel1] = useState(5);
-  const [vel2, setVel2] = useState(-3);
+  // Display
+  const [dispV1, setDispV1] = useState(5);
+  const [dispV2, setDispV2] = useState(-3);
+  const [dispP1, setDispP1] = useState(150);
+  const [dispP2, setDispP2] = useState(550);
+  const [cursor, setCursor] = useState<"default" | "grab" | "grabbing">("default");
 
-  const CANVAS_W = 740;
-  const CANVAS_H = 300;
-  const GROUND_Y = 220;
-  const SCALE = 3;
+  // Physics refs
+  const p1Ref = useRef(150);
+  const p2Ref = useRef(550);
+  const vel1Ref = useRef(5);
+  const vel2Ref = useRef(-3);
+  const collidedRef = useRef(false);
+  const draggingRef = useRef<0 | 1 | 2>(0); // 0=none 1=obj1 2=obj2
 
-  function getRadius(m: number) {
-    return 15 + m * 5;
-  }
+  const paramsRef = useRef({ mass1: 2, mass2: 1, elastic: true, speed: 1 });
+  useEffect(() => {
+    paramsRef.current = { mass1, mass2, elastic, speed };
+  }, [mass1, mass2, elastic, speed]);
 
-  const draw = useCallback(
-    (p1: number, p2: number, currentV1: number, currentV2: number, hasCollided: boolean) => {
+  // ---------- Drawing ----------
+  const drawScene = useCallback(
+    (
+      p1: number, p2: number,
+      cv1: number, cv2: number,
+      hasCollided: boolean
+    ) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
+      const { mass1: m1, mass2: m2 } = paramsRef.current;
+      const r1 = getRadius(m1);
+      const r2 = getRadius(m2);
+
       ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
       // Ground
-      ctx.strokeStyle = "#888";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = "#9ca3af";
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(0, GROUND_Y);
       ctx.lineTo(CANVAS_W, GROUND_Y);
       ctx.stroke();
 
-      const r1 = getRadius(mass1);
-      const r2 = getRadius(mass2);
+      // Hatching below ground
+      ctx.strokeStyle = "rgba(156,163,175,0.3)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 20; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 40, GROUND_Y);
+        ctx.lineTo(i * 40 - 16, GROUND_Y + 16);
+        ctx.stroke();
+      }
 
-      // Object 1
+      // Object 1 (blue)
+      const g1 = ctx.createRadialGradient(p1 - r1 * 0.3, GROUND_Y - r1 - r1 * 0.3, 2, p1, GROUND_Y - r1, r1);
+      g1.addColorStop(0, "#93c5fd");
+      g1.addColorStop(1, "#2563eb");
       ctx.beginPath();
       ctx.arc(p1, GROUND_Y - r1, r1, 0, Math.PI * 2);
-      ctx.fillStyle = "#3b82f6";
+      ctx.fillStyle = g1;
       ctx.fill();
       ctx.fillStyle = "#fff";
-      ctx.font = "bold 12px sans-serif";
+      ctx.font = `bold ${Math.max(10, Math.round(r1 * 0.55))}px sans-serif`;
       ctx.textAlign = "center";
-      ctx.fillText(`${mass1}kg`, p1, GROUND_Y - r1 + 4);
+      ctx.fillText(`${m1}kg`, p1, GROUND_Y - r1 + 4);
 
-      // Object 2
+      // Object 2 (red)
+      const g2 = ctx.createRadialGradient(p2 - r2 * 0.3, GROUND_Y - r2 - r2 * 0.3, 2, p2, GROUND_Y - r2, r2);
+      g2.addColorStop(0, "#fca5a5");
+      g2.addColorStop(1, "#dc2626");
       ctx.beginPath();
       ctx.arc(p2, GROUND_Y - r2, r2, 0, Math.PI * 2);
-      ctx.fillStyle = "#ef4444";
+      ctx.fillStyle = g2;
       ctx.fill();
       ctx.fillStyle = "#fff";
-      ctx.fillText(`${mass2}kg`, p2, GROUND_Y - r2 + 4);
+      ctx.font = `bold ${Math.max(10, Math.round(r2 * 0.55))}px sans-serif`;
+      ctx.fillText(`${m2}kg`, p2, GROUND_Y - r2 + 4);
 
       // Velocity arrows
-      ctx.strokeStyle = "#3b82f6";
-      ctx.lineWidth = 2;
-      if (Math.abs(currentV1) > 0.1) {
-        const arrowLen = currentV1 * 8;
-        ctx.beginPath();
-        ctx.moveTo(p1, GROUND_Y - r1 * 2 - 10);
-        ctx.lineTo(p1 + arrowLen, GROUND_Y - r1 * 2 - 10);
-        ctx.stroke();
-        ctx.fillStyle = "#3b82f6";
-        ctx.beginPath();
-        ctx.moveTo(p1 + arrowLen, GROUND_Y - r1 * 2 - 15);
-        ctx.lineTo(p1 + arrowLen + (currentV1 > 0 ? 8 : -8), GROUND_Y - r1 * 2 - 10);
-        ctx.lineTo(p1 + arrowLen, GROUND_Y - r1 * 2 - 5);
-        ctx.fill();
-      }
+      const drawArrow = (c2: CanvasRenderingContext2D, ox: number, r: number, vel: number, color: string) => {
+        if (Math.abs(vel) < 0.05) return;
+        const arrowLen = vel * 10;
+        const topY = GROUND_Y - r * 2 - 12;
+        c2.strokeStyle = color;
+        c2.lineWidth = 2.5;
+        c2.beginPath();
+        c2.moveTo(ox, topY);
+        c2.lineTo(ox + arrowLen, topY);
+        c2.stroke();
+        c2.fillStyle = color;
+        c2.beginPath();
+        const dir = vel > 0 ? 1 : -1;
+        c2.moveTo(ox + arrowLen, topY);
+        c2.lineTo(ox + arrowLen - dir * 9, topY - 5);
+        c2.lineTo(ox + arrowLen - dir * 9, topY + 5);
+        c2.closePath();
+        c2.fill();
+      };
+      drawArrow(ctx, p1, r1, cv1, "#3b82f6");
+      drawArrow(ctx, p2, r2, cv2, "#ef4444");
 
-      ctx.strokeStyle = "#ef4444";
-      if (Math.abs(currentV2) > 0.1) {
-        const arrowLen = currentV2 * 8;
-        ctx.beginPath();
-        ctx.moveTo(p2, GROUND_Y - r2 * 2 - 10);
-        ctx.lineTo(p2 + arrowLen, GROUND_Y - r2 * 2 - 10);
-        ctx.stroke();
-        ctx.fillStyle = "#ef4444";
-        ctx.beginPath();
-        ctx.moveTo(p2 + arrowLen, GROUND_Y - r2 * 2 - 15);
-        ctx.lineTo(p2 + arrowLen + (currentV2 > 0 ? 8 : -8), GROUND_Y - r2 * 2 - 10);
-        ctx.lineTo(p2 + arrowLen, GROUND_Y - r2 * 2 - 5);
-        ctx.fill();
-      }
-
-      // Labels
-      ctx.fillStyle = "#888";
-      ctx.font = "11px sans-serif";
+      // Speed labels
+      ctx.fillStyle = "#6b7280";
+      ctx.font = "10px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`v = ${currentV1.toFixed(1)} m/s`, p1, GROUND_Y + 20);
-      ctx.fillText(`v = ${currentV2.toFixed(1)} m/s`, p2, GROUND_Y + 20);
+      ctx.fillText(`v₁ = ${cv1.toFixed(2)} m/s`, p1, GROUND_Y + 18);
+      ctx.fillText(`v₂ = ${cv2.toFixed(2)} m/s`, p2, GROUND_Y + 18);
 
       if (hasCollided) {
+        ctx.save();
         ctx.fillStyle = "#22c55e";
-        ctx.font = "bold 14px sans-serif";
-        ctx.fillText("Collision!", CANVAS_W / 2, 30);
+        ctx.font = "bold 15px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Collision!", CANVAS_W / 2, 28);
+        ctx.restore();
       }
+
+      // Drag hint
+      ctx.fillStyle = "rgba(156,163,175,0.8)";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("Drag objects to reposition", 10, CANVAS_H - 10);
     },
-    [mass1, mass2]
+    [] // reads from paramsRef
   );
 
   useEffect(() => {
-    draw(pos1, pos2, vel1, vel2, collided);
-  }, [draw, pos1, pos2, vel1, vel2, collided]);
+    if (!running) {
+      drawScene(p1Ref.current, p2Ref.current, vel1Ref.current, vel2Ref.current, collidedRef.current);
+    }
+  }, [drawScene, mass1, mass2, running]);
 
+  // ---------- Animation loop ----------
   useEffect(() => {
     if (!running) return;
-
     let lastTs: number | null = null;
-    let p1 = pos1;
-    let p2 = pos2;
-    let cV1 = vel1;
-    let cV2 = vel2;
-    let hasCollided = collided;
 
     function step(ts: number) {
       if (!lastTs) lastTs = ts;
-      const dt = Math.min((ts - lastTs) / 1000, 0.05);
+      const raw = Math.min((ts - lastTs) / 1000, 0.05);
       lastTs = ts;
 
-      p1 += cV1 * SCALE * dt * 60;
-      p2 += cV2 * SCALE * dt * 60;
+      const { mass1: m1, mass2: m2, elastic: isElastic, speed: s } = paramsRef.current;
+      const dt = raw * s;
+      const r1 = getRadius(m1);
+      const r2 = getRadius(m2);
 
-      const r1 = getRadius(mass1);
-      const r2 = getRadius(mass2);
+      // Integrate positions
+      p1Ref.current += vel1Ref.current * 60 * dt;
+      p2Ref.current += vel2Ref.current * 60 * dt;
 
-      if (!hasCollided && p1 + r1 >= p2 - r2) {
-        hasCollided = true;
-        if (elastic) {
-          const newV1 =
-            ((mass1 - mass2) * cV1 + 2 * mass2 * cV2) / (mass1 + mass2);
-          const newV2 =
-            ((mass2 - mass1) * cV2 + 2 * mass1 * cV1) / (mass1 + mass2);
-          cV1 = newV1;
-          cV2 = newV2;
+      // Wall bounce
+      if (p1Ref.current - r1 < 0) { p1Ref.current = r1; vel1Ref.current = Math.abs(vel1Ref.current); }
+      if (p1Ref.current + r1 > CANVAS_W) { p1Ref.current = CANVAS_W - r1; vel1Ref.current = -Math.abs(vel1Ref.current); }
+      if (p2Ref.current - r2 < 0) { p2Ref.current = r2; vel2Ref.current = Math.abs(vel2Ref.current); }
+      if (p2Ref.current + r2 > CANVAS_W) { p2Ref.current = CANVAS_W - r2; vel2Ref.current = -Math.abs(vel2Ref.current); }
+
+      // Collision detection
+      if (!collidedRef.current && p1Ref.current + r1 >= p2Ref.current - r2) {
+        collidedRef.current = true;
+        if (isElastic) {
+          const newV1 = ((m1 - m2) * vel1Ref.current + 2 * m2 * vel2Ref.current) / (m1 + m2);
+          const newV2 = ((m2 - m1) * vel2Ref.current + 2 * m1 * vel1Ref.current) / (m1 + m2);
+          vel1Ref.current = newV1;
+          vel2Ref.current = newV2;
         } else {
-          const vFinal = (mass1 * cV1 + mass2 * cV2) / (mass1 + mass2);
-          cV1 = vFinal;
-          cV2 = vFinal;
+          const vF = (m1 * vel1Ref.current + m2 * vel2Ref.current) / (m1 + m2);
+          vel1Ref.current = vF;
+          vel2Ref.current = vF;
         }
         setCollided(true);
-        setVel1(cV1);
-        setVel2(cV2);
       }
 
-      setPos1(p1);
-      setPos2(p2);
+      drawScene(p1Ref.current, p2Ref.current, vel1Ref.current, vel2Ref.current, collidedRef.current);
+      setDispV1(+vel1Ref.current.toFixed(2));
+      setDispV2(+vel2Ref.current.toFixed(2));
+      setDispP1(+p1Ref.current.toFixed(0));
+      setDispP2(+p2Ref.current.toFixed(0));
 
-      if (p1 < -50 || p1 > CANVAS_W + 50 || p2 < -50 || p2 > CANVAS_W + 50) {
+      // Stop when both objects have moved far apart after collision and are slowing
+      const gap = p2Ref.current - r2 - (p1Ref.current + r1);
+      if (collidedRef.current && gap > 400) {
         setRunning(false);
+        setDone(true);
         return;
       }
 
-      draw(p1, p2, cV1, cV2, hasCollided);
-      animationRef.current = requestAnimationFrame(step);
+      animRef.current = requestAnimationFrame(step);
     }
 
-    animationRef.current = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(animationRef.current);
-  }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
+    animRef.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [running, drawScene]);
+
+  // ---------- Canvas drag ----------
+  function toCanvas(e: React.MouseEvent<HTMLCanvasElement>) {
+    const c = canvasRef.current!;
+    const r = c.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) * (CANVAS_W / r.width),
+      y: (e.clientY - r.top) * (CANVAS_H / r.height),
+    };
+  }
+
+  function whichObject(cx: number, cy: number): 0 | 1 | 2 {
+    const { mass1: m1, mass2: m2 } = paramsRef.current;
+    const r1 = getRadius(m1) + 12, r2 = getRadius(m2) + 12;
+    if (Math.hypot(cx - p1Ref.current, cy - (GROUND_Y - getRadius(m1))) < r1) return 1;
+    if (Math.hypot(cx - p2Ref.current, cy - (GROUND_Y - getRadius(m2))) < r2) return 2;
+    return 0;
+  }
+
+  function handleMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (running) return;
+    const { x, y } = toCanvas(e);
+    const which = whichObject(x, y);
+    if (which) {
+      draggingRef.current = which;
+      setCursor("grabbing");
+    }
+  }
+
+  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    const { x, y } = toCanvas(e);
+    if (!running && draggingRef.current) {
+      const { mass1: m1, mass2: m2 } = paramsRef.current;
+      if (draggingRef.current === 1) {
+        p1Ref.current = clampPos(x, getRadius(m1));
+        setDispP1(+p1Ref.current.toFixed(0));
+      } else {
+        p2Ref.current = clampPos(x, getRadius(m2));
+        setDispP2(+p2Ref.current.toFixed(0));
+      }
+      drawScene(p1Ref.current, p2Ref.current, vel1Ref.current, vel2Ref.current, collidedRef.current);
+    } else if (!running) {
+      setCursor(whichObject(x, y) ? "grab" : "default");
+    }
+  }
+
+  function handleMouseUp() {
+    draggingRef.current = 0;
+    setCursor("default");
+  }
+
+  // ---------- Controls ----------
+  function doReset() {
+    cancelAnimationFrame(animRef.current);
+    setRunning(false);
+    setCollided(false);
+    setDone(false);
+    collidedRef.current = false;
+    p1Ref.current = 150;
+    p2Ref.current = 550;
+    vel1Ref.current = v1Init;
+    vel2Ref.current = v2Init;
+    setDispP1(150);
+    setDispP2(550);
+    setDispV1(v1Init);
+    setDispV2(v2Init);
+    drawScene(150, 550, v1Init, v2Init, false);
+  }
 
   function handleStart() {
-    setPos1(150);
-    setPos2(550);
-    setVel1(v1);
-    setVel2(v2);
+    p1Ref.current = 150;
+    p2Ref.current = 550;
+    vel1Ref.current = v1Init;
+    vel2Ref.current = v2Init;
+    collidedRef.current = false;
     setCollided(false);
+    setDone(false);
+    setDispV1(v1Init);
+    setDispV2(v2Init);
     setRunning(true);
   }
 
-  function handlePause() {
-    cancelAnimationFrame(animationRef.current);
-    setRunning(false);
-  }
-
-  function handleResume() {
-    setRunning(true);
-  }
-
-  function handleReset() {
-    cancelAnimationFrame(animationRef.current);
-    setRunning(false);
-    setCollided(false);
-    setPos1(150);
-    setPos2(550);
-    setVel1(v1);
-    setVel2(v2);
-  }
-
-  const totalMomentumBefore = mass1 * v1 + mass2 * v2;
-  const keBefore = 0.5 * mass1 * v1 * v1 + 0.5 * mass2 * v2 * v2;
+  const momentumBefore = mass1 * v1Init + mass2 * v2Init;
+  const keBefore = 0.5 * mass1 * v1Init ** 2 + 0.5 * mass2 * v2Init ** 2;
   const keAfter = collided
-    ? 0.5 * mass1 * vel1 * vel1 + 0.5 * mass2 * vel2 * vel2
+    ? 0.5 * mass1 * dispV1 ** 2 + 0.5 * mass2 * dispV2 ** 2
     : keBefore;
 
   return (
@@ -222,7 +332,12 @@ export function CollisionSim() {
             ref={canvasRef}
             width={CANVAS_W}
             height={CANVAS_H}
-            className="w-full rounded-lg bg-background border"
+            className="w-full rounded-lg bg-background border select-none"
+            style={{ cursor }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
           />
         </CardContent>
       </Card>
@@ -237,41 +352,50 @@ export function CollisionSim() {
               <Badge
                 variant={elastic ? "default" : "outline"}
                 className="cursor-pointer"
-                onClick={() => { setElastic(true); handleReset(); }}
+                onClick={() => { setElastic(true); doReset(); }}
               >
                 Elastic
               </Badge>
               <Badge
                 variant={!elastic ? "default" : "outline"}
                 className="cursor-pointer"
-                onClick={() => { setElastic(false); handleReset(); }}
+                onClick={() => { setElastic(false); doReset(); }}
               >
                 Inelastic
               </Badge>
             </div>
             <div>
               <Label className="text-xs text-blue-500">Mass 1: {mass1} kg</Label>
-              <Slider value={[mass1]} onValueChange={(val) => { setMass1(Array.isArray(val) ? val[0] : val); handleReset(); }} min={1} max={10} step={0.5} disabled={running} />
+              <Slider value={[mass1]} onValueChange={(v) => { setMass1(sliderVal(v)); doReset(); }} min={1} max={10} step={0.5} disabled={running} />
             </div>
             <div>
               <Label className="text-xs text-red-500">Mass 2: {mass2} kg</Label>
-              <Slider value={[mass2]} onValueChange={(val) => { setMass2(Array.isArray(val) ? val[0] : val); handleReset(); }} min={1} max={10} step={0.5} disabled={running} />
+              <Slider value={[mass2]} onValueChange={(v) => { setMass2(sliderVal(v)); doReset(); }} min={1} max={10} step={0.5} disabled={running} />
             </div>
             <div>
-              <Label className="text-xs text-blue-500">Velocity 1: {v1} m/s</Label>
-              <Slider value={[v1]} onValueChange={(val) => { setV1(Array.isArray(val) ? val[0] : val); handleReset(); }} min={-10} max={10} step={0.5} disabled={running} />
+              <Label className="text-xs text-blue-500">Velocity 1: {v1Init > 0 ? "+" : ""}{v1Init} m/s</Label>
+              <Slider value={[v1Init]} onValueChange={(v) => { setV1Init(sliderVal(v)); doReset(); }} min={-12} max={12} step={0.5} disabled={running} />
             </div>
             <div>
-              <Label className="text-xs text-red-500">Velocity 2: {v2} m/s</Label>
-              <Slider value={[v2]} onValueChange={(val) => { setV2(Array.isArray(val) ? val[0] : val); handleReset(); }} min={-10} max={10} step={0.5} disabled={running} />
+              <Label className="text-xs text-red-500">Velocity 2: {v2Init > 0 ? "+" : ""}{v2Init} m/s</Label>
+              <Slider value={[v2Init]} onValueChange={(v) => { setV2Init(sliderVal(v)); doReset(); }} min={-12} max={12} step={0.5} disabled={running} />
             </div>
+            <div>
+              <Label className="text-xs">Speed: {speed === 1 ? "1× (real-time)" : `${speed}×`}</Label>
+              <Slider value={[speed]} onValueChange={(v) => setSpeed(sliderVal(v))} min={0.25} max={4} step={0.25} />
+            </div>
+
             <div className="flex gap-2">
               {running ? (
-                <Button variant="outline" onClick={handlePause} className="flex-1">
+                <Button variant="outline" onClick={() => { cancelAnimationFrame(animRef.current); setRunning(false); }} className="flex-1">
                   <Pause className="h-4 w-4 mr-1" /> Pause
                 </Button>
-              ) : collided || pos1 !== 150 || pos2 !== 550 ? (
-                <Button onClick={handleResume} className="flex-1" disabled={collided && !running && (pos1 < -50 || pos2 > 800)}>
+              ) : done ? (
+                <Button onClick={doReset} className="flex-1">
+                  <RotateCcw className="h-4 w-4 mr-1" /> New Run
+                </Button>
+              ) : collided || dispP1 !== 150 || dispP2 !== 550 ? (
+                <Button onClick={() => setRunning(true)} className="flex-1">
                   <Play className="h-4 w-4 mr-1" /> Resume
                 </Button>
               ) : (
@@ -279,7 +403,7 @@ export function CollisionSim() {
                   <Play className="h-4 w-4 mr-1" /> Go
                 </Button>
               )}
-              <Button variant="outline" onClick={handleReset} className="flex-1">
+              <Button variant="outline" onClick={doReset} className="flex-1">
                 <RotateCcw className="h-4 w-4 mr-1" /> Reset
               </Button>
             </div>
@@ -288,27 +412,35 @@ export function CollisionSim() {
 
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Physics</CardTitle>
+            <CardTitle className="text-sm">Conservation Laws</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Total Momentum</span>
-              <span className="font-mono">{totalMomentumBefore.toFixed(1)} kg·m/s</span>
+              <span className="text-muted-foreground">Momentum p</span>
+              <span className="font-mono">{momentumBefore.toFixed(2)} kg·m/s</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">KE Before</span>
-              <span className="font-mono">{keBefore.toFixed(1)} J</span>
+              <span className="text-muted-foreground">KE before</span>
+              <span className="font-mono">{keBefore.toFixed(2)} J</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">KE After</span>
-              <span className="font-mono">{keAfter.toFixed(1)} J</span>
+              <span className="text-muted-foreground">KE after</span>
+              <span className="font-mono">{keAfter.toFixed(2)} J</span>
             </div>
             {collided && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">KE Lost</span>
-                <span className="font-mono">{(keBefore - keAfter).toFixed(1)} J</span>
+              <div className="flex justify-between border-t pt-2">
+                <span className="text-muted-foreground">KE lost</span>
+                <span className="font-mono text-amber-600">{Math.max(0, keBefore - keAfter).toFixed(2)} J</span>
               </div>
             )}
+            <div className="flex justify-between border-t pt-2 text-xs">
+              <span className="text-muted-foreground">v₁</span>
+              <span className="font-mono">{dispV1} m/s</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-muted-foreground">v₂</span>
+              <span className="font-mono">{dispV2} m/s</span>
+            </div>
           </CardContent>
         </Card>
       </div>

@@ -7,248 +7,400 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Play, Pause, RotateCcw } from "lucide-react";
 
+const CANVAS_W = 740;
+const CANVAS_H = 360;
+const ANCHOR_X = 60;
+const REST_X = 340; // equilibrium block left-edge x
+const AXIS_Y = CANVAS_H / 2;
+
+function sliderVal(v: number | readonly number[]): number {
+  return typeof v === "number" ? v : v[0];
+}
+
+function drawSpringPath(
+  ctx: CanvasRenderingContext2D,
+  fromX: number,
+  toX: number,
+  y: number
+) {
+  const coils = 14;
+  const amp = 14;
+  ctx.beginPath();
+  ctx.moveTo(fromX, y);
+  const seg = (toX - fromX) / (coils * 2 + 2);
+  ctx.lineTo(fromX + seg, y);
+  for (let i = 0; i < coils * 2; i++) {
+    const x = fromX + seg + (i + 0.5) * seg;
+    const yOff = (i % 2 === 0 ? -1 : 1) * amp;
+    ctx.lineTo(x, y + yOff);
+  }
+  ctx.lineTo(toX, y);
+  ctx.strokeStyle = "#6b7280";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+}
+
 export function SpringSim() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>(0);
+  const animRef = useRef<number>(0);
 
+  // Params
   const [mass, setMass] = useState(2);
   const [springK, setSpringK] = useState(10);
   const [damping, setDamping] = useState(0.1);
-  const [initDisplacement, setInitDisplacement] = useState(100);
+  const [initDisp, setInitDisp] = useState(1.2); // metres
+  const [speed, setSpeed] = useState(1);
   const [running, setRunning] = useState(false);
 
-  const [displacement, setDisplacement] = useState(100);
-  const [velocity, setVelocity] = useState(0);
-  const [time, setTime] = useState(0);
+  // Display
+  const [dispX, setDispX] = useState(1.2);
+  const [dispV, setDispV] = useState(0);
+  const [dispT, setDispT] = useState(0);
+  const [cursor, setCursor] = useState<"default" | "grab" | "grabbing">("default");
 
-  const CANVAS_W = 740;
-  const CANVAS_H = 350;
-  const ANCHOR_X = 60;
-  const REST_Y = CANVAS_H / 2;
+  // Physics refs — displacement and velocity in metres
+  const xRef = useRef(1.2);   // metres from equilibrium
+  const vRef = useRef(0);
+  const tRef = useRef(0);
+  const draggingRef = useRef(false);
+
+  const paramsRef = useRef({ mass: 2, springK: 10, damping: 0.1, speed: 1 });
+  useEffect(() => {
+    paramsRef.current = { mass, springK, damping, speed };
+  }, [mass, springK, damping, speed]);
 
   const period = 2 * Math.PI * Math.sqrt(mass / springK);
-  const frequency = 1 / period;
+  const freq = 1 / period;
 
-  const drawSpring = useCallback(
-    (ctx: CanvasRenderingContext2D, startX: number, startY: number, endX: number, endY: number) => {
-      const coils = 12;
-      const amplitude = 15;
-      const dx = endX - startX;
-      const dy = endY - startY;
-      const len = Math.sqrt(dx * dx + dy * dy);
+  // Canvas scale: 1 m = PX_PER_M pixels of displacement
+  const PX_PER_M = 130;
 
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
+  // Block size based on mass
+  function blockSize(m: number) {
+    return 22 + m * 3.5;
+  }
 
-      for (let i = 0; i <= coils * 2; i++) {
-        const t = i / (coils * 2);
-        const x = startX + dx * t;
-        const y = startY + dy * t + (i % 2 === 0 ? 1 : -1) * amplitude * (i > 0 && i < coils * 2 ? 1 : 0);
-        ctx.lineTo(x, y);
-      }
+  // Block left-edge x from displacement
+  function blockX(dispM: number) {
+    return REST_X + dispM * PX_PER_M;
+  }
 
-      ctx.strokeStyle = "#888";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    },
-    []
-  );
-
-  const draw = useCallback(
-    (disp: number, vel: number, t: number) => {
+  // ---------- Drawing ----------
+  const drawScene = useCallback(
+    (dispM: number, velMs: number, t: number) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
+      const { mass: m, springK: k } = paramsRef.current;
+      const bs = blockSize(m);
+      const bx = blockX(dispM);
+
       ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
       // Wall
-      ctx.fillStyle = "#666";
-      ctx.fillRect(0, REST_Y - 80, ANCHOR_X, 160);
-      ctx.strokeStyle = "#888";
-      for (let i = 0; i < 8; i++) {
+      ctx.fillStyle = "#4b5563";
+      ctx.fillRect(0, AXIS_Y - 80, ANCHOR_X, 160);
+      ctx.strokeStyle = "#6b7280";
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 9; i++) {
         ctx.beginPath();
-        ctx.moveTo(ANCHOR_X - 15, REST_Y - 70 + i * 20);
-        ctx.lineTo(ANCHOR_X, REST_Y - 60 + i * 20);
+        ctx.moveTo(ANCHOR_X - 14, AXIS_Y - 72 + i * 18);
+        ctx.lineTo(ANCHOR_X, AXIS_Y - 58 + i * 18);
         ctx.stroke();
       }
 
-      // Rest position line
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = "#ccc";
+      // Equilibrium dashed line
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = "rgba(156,163,175,0.5)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(350, REST_Y - 60);
-      ctx.lineTo(350, REST_Y + 60);
+      ctx.moveTo(REST_X + bs / 2, AXIS_Y - bs - 10);
+      ctx.lineTo(REST_X + bs / 2, AXIS_Y + 14);
       ctx.stroke();
       ctx.setLineDash([]);
-
-      ctx.fillStyle = "#ccc";
+      ctx.fillStyle = "rgba(156,163,175,0.6)";
       ctx.font = "10px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("equilibrium", 350, REST_Y + 75);
+      ctx.fillText("x = 0", REST_X + bs / 2, AXIS_Y + 26);
 
-      const blockX = 350 + disp;
-      const blockSize = 20 + mass * 4;
+      // Displacement ruler tick
+      if (Math.abs(dispM) > 0.02) {
+        ctx.setLineDash([3, 5]);
+        ctx.strokeStyle = "#6366f1";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(REST_X + bs / 2, AXIS_Y + 38);
+        ctx.lineTo(bx + bs / 2, AXIS_Y + 38);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#6366f1";
+        ctx.font = "10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(
+          `x = ${dispM > 0 ? "+" : ""}${dispM.toFixed(2)} m`,
+          (REST_X + bx) / 2 + bs / 2,
+          AXIS_Y + 52
+        );
+      }
 
       // Spring
-      drawSpring(ctx, ANCHOR_X, REST_Y, blockX - blockSize / 2, REST_Y);
+      drawSpringPath(ctx, ANCHOR_X, bx, AXIS_Y);
 
-      // Block
-      ctx.fillStyle = "#3b82f6";
-      ctx.fillRect(
-        blockX - blockSize / 2,
-        REST_Y - blockSize / 2,
-        blockSize,
-        blockSize
-      );
+      // Block gradient
+      const grad = ctx.createLinearGradient(bx, AXIS_Y - bs, bx + bs, AXIS_Y);
+      grad.addColorStop(0, "#93c5fd");
+      grad.addColorStop(1, "#2563eb");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.roundRect(bx, AXIS_Y - bs, bs, bs, 4);
+      ctx.fill();
       ctx.fillStyle = "#fff";
-      ctx.font = "bold 11px sans-serif";
+      ctx.font = `bold ${Math.max(9, Math.round(bs * 0.35))}px sans-serif`;
       ctx.textAlign = "center";
-      ctx.fillText(`${mass}kg`, blockX, REST_Y + 4);
+      ctx.fillText(`${m}kg`, bx + bs / 2, AXIS_Y - bs / 2 + 4);
 
-      // Force arrow
-      const force = -springK * (disp / 100);
-      if (Math.abs(force) > 0.3) {
-        const arrowLen = force * 15;
+      // Restoring force arrow
+      const force = -k * dispM;
+      if (Math.abs(force) > 0.25) {
+        const arrowLen = Math.min(Math.abs(force) * 18, 120) * Math.sign(force);
+        const arrowY = AXIS_Y - bs - 22;
         ctx.strokeStyle = "#ef4444";
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.moveTo(blockX, REST_Y - blockSize / 2 - 15);
-        ctx.lineTo(blockX + arrowLen, REST_Y - blockSize / 2 - 15);
+        ctx.moveTo(bx + bs / 2, arrowY);
+        ctx.lineTo(bx + bs / 2 + arrowLen, arrowY);
         ctx.stroke();
+        const dir = force > 0 ? 1 : -1;
         ctx.fillStyle = "#ef4444";
-        ctx.font = "10px sans-serif";
-        ctx.fillText("F", blockX + arrowLen / 2, REST_Y - blockSize / 2 - 22);
+        ctx.beginPath();
+        ctx.moveTo(bx + bs / 2 + arrowLen, arrowY);
+        ctx.lineTo(bx + bs / 2 + arrowLen - dir * 9, arrowY - 5);
+        ctx.lineTo(bx + bs / 2 + arrowLen - dir * 9, arrowY + 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.font = "bold 10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`F = ${force.toFixed(1)} N`, bx + bs / 2 + arrowLen / 2, arrowY - 8);
       }
 
-      // Trail (energy bar)
-      const pe = 0.5 * springK * (disp / 100) * (disp / 100);
-      const ke = 0.5 * mass * (vel / 100) * (vel / 100);
+      // Energy bar (top-right)
+      const pe = 0.5 * k * dispM * dispM;
+      const ke = 0.5 * m * velMs * velMs;
       const totalE = pe + ke;
-      const barWidth = 200;
-      const barX = CANVAS_W - barWidth - 30;
-      const barY = 30;
-
-      ctx.fillStyle = "#eee";
-      ctx.fillRect(barX, barY, barWidth, 20);
-      if (totalE > 0) {
-        const peWidth = (pe / totalE) * barWidth;
+      const bw = 200, bX2 = CANVAS_W - bw - 18, bY = 16;
+      ctx.fillStyle = "rgba(220,220,220,0.8)";
+      ctx.fillRect(bX2, bY, bw, 18);
+      if (totalE > 0.0001) {
+        const pw = (pe / totalE) * bw;
         ctx.fillStyle = "#22c55e";
-        ctx.fillRect(barX, barY, peWidth, 20);
-        ctx.fillStyle = "#3b82f6";
-        ctx.fillRect(barX + peWidth, barY, barWidth - peWidth, 20);
+        ctx.fillRect(bX2, bY, pw, 18);
+        ctx.fillStyle = "#6366f1";
+        ctx.fillRect(bX2 + pw, bY, bw - pw, 18);
       }
-      ctx.fillStyle = "#666";
+      ctx.fillStyle = "#444";
       ctx.font = "10px sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText("PE", barX + 4, barY + 14);
+      ctx.fillText("PE", bX2 + 4, bY + 13);
       ctx.textAlign = "right";
-      ctx.fillText("KE", barX + barWidth - 4, barY + 14);
+      ctx.fillText("KE", bX2 + bw - 4, bY + 13);
 
-      // Info
-      ctx.fillStyle = "#888";
+      // Telemetry
+      ctx.fillStyle = "#6b7280";
       ctx.font = "11px sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText(`t = ${t.toFixed(2)}s`, 20, 30);
-      ctx.fillText(`x = ${(disp / 100).toFixed(2)}m`, 20, 46);
+      ctx.fillText(`t = ${t.toFixed(2)} s`, 14, 22);
+      ctx.fillText(`v = ${velMs.toFixed(3)} m/s`, 14, 38);
+
+      // Drag hint
+      ctx.fillStyle = "rgba(156,163,175,0.75)";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("Drag block to set displacement", 14, CANVAS_H - 10);
     },
-    [mass, springK, drawSpring]
+    [] // reads from paramsRef
   );
 
   useEffect(() => {
     if (!running) {
-      draw(displacement, velocity, time);
-      return;
+      drawScene(xRef.current, vRef.current, tRef.current);
     }
+  }, [drawScene, mass, springK, damping, running]);
 
+  // ---------- Animation loop ----------
+  useEffect(() => {
+    if (!running) return;
     let lastTs: number | null = null;
-    let d = displacement;
-    let v = velocity;
-    let t = time;
 
     function step(ts: number) {
       if (!lastTs) lastTs = ts;
-      const dt = Math.min((ts - lastTs) / 1000, 0.02);
+      const raw = Math.min((ts - lastTs) / 1000, 0.05);
       lastTs = ts;
 
-      const acc = (-springK * (d / 100) - damping * (v / 100)) / mass;
-      v += acc * 100 * dt;
-      d += v * dt;
-      t += dt;
+      const { mass: m, springK: k, damping: b, speed: s } = paramsRef.current;
+      const substeps = Math.max(1, Math.ceil((raw * s) / 0.004));
+      const dt = (raw * s) / substeps;
 
-      setDisplacement(d);
-      setVelocity(v);
-      setTime(t);
+      for (let i = 0; i < substeps; i++) {
+        // x'' = -(k/m)x - (b/m)x'
+        const acc = -(k / m) * xRef.current - (b / m) * vRef.current;
+        vRef.current += acc * dt;
+        xRef.current += vRef.current * dt;
+      }
+      tRef.current += raw * s;
 
-      draw(d, v, t);
-      animationRef.current = requestAnimationFrame(step);
+      drawScene(xRef.current, vRef.current, tRef.current);
+      setDispX(+xRef.current.toFixed(3));
+      setDispV(+vRef.current.toFixed(3));
+      setDispT(+tRef.current.toFixed(2));
+
+      animRef.current = requestAnimationFrame(step);
     }
 
-    animationRef.current = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(animationRef.current);
-  }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
+    animRef.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [running, drawScene]);
+
+  // ---------- Canvas drag ----------
+  function toCanvas(e: React.MouseEvent<HTMLCanvasElement>) {
+    const c = canvasRef.current!;
+    const r = c.getBoundingClientRect();
+    return (e.clientX - r.left) * (CANVAS_W / r.width);
+  }
+
+  function onBlockRegion(cx: number) {
+    const { mass: m } = paramsRef.current;
+    const bs = blockSize(m);
+    const bx = blockX(xRef.current);
+    return cx >= bx - 10 && cx <= bx + bs + 10;
+  }
+
+  function handleMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (running) return;
+    const cx = toCanvas(e);
+    if (onBlockRegion(cx)) {
+      draggingRef.current = true;
+      setCursor("grabbing");
+    }
+  }
+
+  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    const cx = toCanvas(e);
+    if (!running && draggingRef.current) {
+      const { mass: m } = paramsRef.current;
+      const bs = blockSize(m);
+      // Block centre x
+      const centreX = cx - bs / 2;
+      // Displacement from REST_X
+      const newDisp = (centreX - REST_X) / PX_PER_M;
+      const clamped = Math.max(-2.2, Math.min(2.8, newDisp));
+      xRef.current = clamped;
+      vRef.current = 0;
+      setInitDisp(+clamped.toFixed(2));
+      setDispX(+clamped.toFixed(3));
+      setDispV(0);
+      drawScene(clamped, 0, tRef.current);
+    } else if (!running) {
+      setCursor(onBlockRegion(cx) ? "grab" : "default");
+    }
+  }
+
+  function handleMouseUp() {
+    draggingRef.current = false;
+    setCursor("default");
+  }
+
+  // ---------- Controls ----------
+  function doReset(disp = initDisp) {
+    cancelAnimationFrame(animRef.current);
+    setRunning(false);
+    xRef.current = disp;
+    vRef.current = 0;
+    tRef.current = 0;
+    setDispX(+disp.toFixed(3));
+    setDispV(0);
+    setDispT(0);
+    drawScene(disp, 0, 0);
+  }
 
   function handleStart() {
-    setDisplacement(initDisplacement);
-    setVelocity(0);
-    setTime(0);
+    xRef.current = initDisp;
+    vRef.current = 0;
+    tRef.current = 0;
+    setDispX(+initDisp.toFixed(3));
+    setDispV(0);
+    setDispT(0);
     setRunning(true);
-  }
-
-  function handlePause() {
-    cancelAnimationFrame(animationRef.current);
-    setRunning(false);
-  }
-
-  function handleResume() {
-    setRunning(true);
-  }
-
-  function handleReset() {
-    cancelAnimationFrame(animationRef.current);
-    setRunning(false);
-    setDisplacement(initDisplacement);
-    setVelocity(0);
-    setTime(0);
   }
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
       <Card>
         <CardContent className="p-4">
-          <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} className="w-full rounded-lg bg-background border" />
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_W}
+            height={CANVAS_H}
+            className="w-full rounded-lg bg-background border select-none"
+            style={{ cursor }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          />
         </CardContent>
       </Card>
 
       <div className="space-y-4">
         <Card>
-          <CardHeader className="pb-3"><CardTitle className="text-sm">Controls</CardTitle></CardHeader>
-          <CardContent className="space-y-5">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Controls</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
             <div>
-              <Label className="text-xs">Mass: {mass} kg</Label>
-              <Slider value={[mass]} onValueChange={(val) => { setMass(Array.isArray(val) ? val[0] : val); handleReset(); }} min={0.5} max={10} step={0.5} disabled={running} />
+              <Label className="text-xs">Mass: {mass.toFixed(1)} kg</Label>
+              <Slider value={[mass]} onValueChange={(v) => { setMass(sliderVal(v)); doReset(); }} min={0.5} max={10} step={0.5} disabled={running} />
             </div>
             <div>
-              <Label className="text-xs">Spring constant k: {springK} N/m</Label>
-              <Slider value={[springK]} onValueChange={(val) => { setSpringK(Array.isArray(val) ? val[0] : val); handleReset(); }} min={1} max={50} step={1} disabled={running} />
+              <Label className="text-xs">Spring k: {springK} N/m</Label>
+              <Slider value={[springK]} onValueChange={(v) => { setSpringK(sliderVal(v)); doReset(); }} min={1} max={60} step={1} disabled={running} />
             </div>
             <div>
-              <Label className="text-xs">Initial stretch: {(initDisplacement / 100).toFixed(1)} m</Label>
-              <Slider value={[initDisplacement]} onValueChange={(val) => { setInitDisplacement(Array.isArray(val) ? val[0] : val); handleReset(); }} min={20} max={200} step={10} disabled={running} />
+              <Label className="text-xs">Initial stretch: {initDisp.toFixed(2)} m</Label>
+              <Slider
+                value={[initDisp]}
+                onValueChange={(v) => {
+                  const d = sliderVal(v);
+                  setInitDisp(d);
+                  if (!running) {
+                    xRef.current = d;
+                    vRef.current = 0;
+                    setDispX(+d.toFixed(3));
+                    setDispV(0);
+                    drawScene(d, 0, tRef.current);
+                  }
+                }}
+                min={-2.2} max={2.8} step={0.05}
+                disabled={running}
+              />
             </div>
             <div>
-              <Label className="text-xs">Damping: {damping}</Label>
-              <Slider value={[damping]} onValueChange={(val) => { setDamping(Array.isArray(val) ? val[0] : val); handleReset(); }} min={0} max={5} step={0.1} disabled={running} />
+              <Label className="text-xs">Damping: {damping.toFixed(2)}</Label>
+              <Slider value={[damping]} onValueChange={(v) => setDamping(sliderVal(v))} min={0} max={5} step={0.05} />
             </div>
+            <div>
+              <Label className="text-xs">Speed: {speed === 1 ? "1× (real-time)" : `${speed}×`}</Label>
+              <Slider value={[speed]} onValueChange={(v) => setSpeed(sliderVal(v))} min={0.25} max={4} step={0.25} />
+            </div>
+
             <div className="flex gap-2">
               {running ? (
-                <Button variant="outline" onClick={handlePause} className="flex-1">
+                <Button variant="outline" onClick={() => { cancelAnimationFrame(animRef.current); setRunning(false); }} className="flex-1">
                   <Pause className="h-4 w-4 mr-1" /> Pause
                 </Button>
-              ) : time > 0 ? (
-                <Button onClick={handleResume} className="flex-1">
+              ) : dispT > 0 ? (
+                <Button onClick={() => setRunning(true)} className="flex-1">
                   <Play className="h-4 w-4 mr-1" /> Resume
                 </Button>
               ) : (
@@ -256,7 +408,7 @@ export function SpringSim() {
                   <Play className="h-4 w-4 mr-1" /> Release
                 </Button>
               )}
-              <Button variant="outline" onClick={handleReset} className="flex-1">
+              <Button variant="outline" onClick={() => doReset()} className="flex-1">
                 <RotateCcw className="h-4 w-4 mr-1" /> Reset
               </Button>
             </div>
@@ -264,19 +416,33 @@ export function SpringSim() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-3"><CardTitle className="text-sm">Predicted Values</CardTitle></CardHeader>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Live Measurements</CardTitle>
+          </CardHeader>
           <CardContent className="space-y-2 text-sm">
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Period</span>
-              <span className="font-mono">{period.toFixed(2)} s</span>
+              <span className="text-muted-foreground">Period T</span>
+              <span className="font-mono">{period.toFixed(3)} s</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Frequency</span>
-              <span className="font-mono">{frequency.toFixed(2)} Hz</span>
+              <span className="text-muted-foreground">Frequency f</span>
+              <span className="font-mono">{freq.toFixed(3)} Hz</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Angular freq</span>
-              <span className="font-mono">{(2 * Math.PI * frequency).toFixed(2)} rad/s</span>
+              <span className="text-muted-foreground">Angular ω₀</span>
+              <span className="font-mono">{(2 * Math.PI * freq).toFixed(3)} rad/s</span>
+            </div>
+            <div className="flex justify-between border-t pt-2">
+              <span className="text-muted-foreground">Displacement x</span>
+              <span className="font-mono">{dispX} m</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Velocity v</span>
+              <span className="font-mono">{dispV} m/s</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Time</span>
+              <span className="font-mono">{dispT} s</span>
             </div>
           </CardContent>
         </Card>
